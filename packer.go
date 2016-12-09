@@ -2,6 +2,7 @@ package packer
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"reflect"
 )
@@ -78,7 +79,7 @@ func (s *packerStorage) getPacker(v interface{}) Packer {
 
 	p, ok := s.m[t]
 	if !ok {
-		p = makePacker(t, v)
+		p = createPacker(t, v)
 		s.m[t] = p
 	}
 
@@ -89,13 +90,20 @@ func (s *packerStorage) getPacker(v interface{}) Packer {
 	return p
 }
 
-func makePacker(t reflect.Type, v interface{}) Packer {
+func createPacker(t reflect.Type, v interface{}) Packer {
 	switch t.Kind() {
 	case reflect.Int:
 		return &Int64Packer{}
+	case reflect.Slice:
+		switch t.Elem().Kind() {
+		case reflect.Uint8:
+			return &BytesPacker{}
+		default:
+			panic(fmt.Errorf("can't create packer for slice of %v, kind: %v", t.Elem(), t.Elem().Kind()))
+		}
+	default:
+		panic(fmt.Errorf("can't create packer for type %v, kind: %v", t, t.Kind()))
 	}
-
-	return nil
 }
 
 type Int64Packer struct {
@@ -180,4 +188,93 @@ func sizeOfVarint(x uint64) (n int) {
 		}
 	}
 	return n
+}
+
+type BytesPacker struct {
+	buf [128]byte
+}
+
+func (p *BytesPacker) Size(vi interface{}) int {
+	s := vi.(string)
+	l := len(s)
+	return sizeOfVarint(uint64(l)) + l
+}
+
+func (p *BytesPacker) WriteTo(w io.Writer, vi interface{}) (int, error) {
+	data := toBytes(vi)
+	l := len(data)
+	lsz := sizeOfVarint(uint64(l))
+
+	v := l
+	offset := 0
+	for v >= 1<<7 {
+		p.buf[offset] = uint8(v&0x7f | 0x80)
+		v >>= 7
+		offset++
+	}
+	p.buf[offset] = uint8(v)
+	offset++
+
+	if lsz+l < len(p.buf) {
+		offset += copy(p.buf[offset:], data)
+		return w.Write(p.buf[:offset])
+	}
+
+	n1, err := w.Write(p.buf[:offset])
+	if err != nil {
+		return n1, err
+	}
+	n2, err := w.Write(data)
+	return n1 + n2, err
+}
+
+func (p *BytesPacker) ReadFrom(r io.Reader, vi interface{}) (int, error) {
+	val := uint64(0)
+	off := 0
+	for shift := uint(0); ; shift += 7 {
+		if shift >= 64 {
+			panic("read error")
+		}
+		n, err := r.Read(p.buf[:1])
+		if err != nil {
+			return 0, err
+		}
+		if n != 1 {
+			panic("n != 1")
+		}
+		b := p.buf[0]
+		val |= (uint64(b) & 0x7F) << shift
+		off++
+		if b < 0x80 {
+			break
+		}
+	}
+
+	l := int(val)
+	data := toBytesPtr(vi)
+	if len(*data) < l {
+		*data = make([]byte, l)
+	}
+
+	return r.Read((*data)[:l])
+}
+
+func toBytes(vi interface{}) []byte {
+	switch t := vi.(type) {
+	case []byte:
+		return t
+	case string:
+		return []byte(t)
+	default:
+		panic("type assertion error")
+	}
+}
+
+func toBytesPtr(vi interface{}) *[]byte {
+	switch t := vi.(type) {
+	case *[]byte:
+		return t
+	default:
+		panic("type assertion error")
+	}
 }
