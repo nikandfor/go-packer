@@ -92,13 +92,14 @@ func (s *packerStorage) getPacker(v interface{}) Packer {
 
 func CreatePacker(v interface{}) Packer {
 	t := reflect.TypeOf(v)
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
 	return createPacker(t)
 }
 
-func createPacker(t reflect.Type) Packer {
+func createPacker(t0 reflect.Type) Packer {
+	t := t0
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
 	switch t.Kind() {
 	case reflect.Int:
 		return &Int64Packer{}
@@ -112,7 +113,7 @@ func createPacker(t reflect.Type) Packer {
 	case reflect.Struct:
 		return NewStructPacker(t)
 	default:
-		panic(fmt.Errorf("can't create packer for type %v, kind: %v", t, t.Kind()))
+		panic(fmt.Errorf("can't create packer for type %v, kind: %v\n%v", t, t.Kind(), DeepTypeDump(t0)))
 	}
 }
 
@@ -121,11 +122,18 @@ type Int64Packer struct {
 }
 
 func (p *Int64Packer) Size(rv reflect.Value) int {
+	rv = inderectValueConst(rv)
+	switch rv.Type().Kind() {
+	case reflect.Int:
+	default:
+		panic(fmt.Errorf("wrong type: %v.  kind %v", rv.Type(), rv.Kind()))
+	}
 	v := uint64(rv.Int())
 	return sizeOfVarint(v)
 }
 
 func (p *Int64Packer) WriteTo(w io.Writer, rv reflect.Value) (int, error) {
+	rv = inderectValueConst(rv)
 	v := uint64(rv.Int())
 	offset := 0
 	for v >= 1<<7 {
@@ -140,6 +148,7 @@ func (p *Int64Packer) WriteTo(w io.Writer, rv reflect.Value) (int, error) {
 }
 
 func (p *Int64Packer) ReadFrom(r io.Reader, rv reflect.Value) (int, error) {
+	rv = inderectValue(rv)
 	val := int64(0)
 	off := 0
 	for shift := uint(0); ; shift += 7 {
@@ -189,7 +198,7 @@ func (p *BytesPacker) Size(vi reflect.Value) int {
 }
 
 func (p *BytesPacker) WriteTo(w io.Writer, rv reflect.Value) (int, error) {
-	data := toBytes(rv)
+	data := rv.Bytes()
 	l := len(data)
 	lsz := sizeOfVarint(uint64(l))
 
@@ -251,21 +260,6 @@ func (p *BytesPacker) ReadFrom(r io.Reader, rv reflect.Value) (int, error) {
 	return r.Read(data[:l])
 }
 
-func toBytes(rv reflect.Value) []byte {
-	return rv.Bytes()
-}
-
-func toBytesPtr(rv reflect.Value) *[]byte {
-	vi := rv.Interface()
-	switch t := vi.(type) {
-	case *[]byte:
-		return t
-	default:
-		print(fmt.Sprintf("%T", vi))
-		panic("type assertion error")
-	}
-}
-
 type StructPacker struct {
 	typ    reflect.Type
 	fields []structField
@@ -296,12 +290,8 @@ func (s *StructPacker) addFields(t reflect.Type) {
 		if ft.PkgPath != "" {
 			continue
 		}
-		if ft.Type.Kind() == reflect.Struct {
-			s.addFields(ft.Type)
-		} else {
-			f := structField{f: ft, p: createPacker(ft.Type)}
-			s.fields = append(s.fields, f)
-		}
+		f := structField{f: ft, p: createPacker(ft.Type)}
+		s.fields = append(s.fields, f)
 	}
 }
 
@@ -338,14 +328,15 @@ func (s *StructPacker) WriteTo(w io.Writer, rv reflect.Value) (int, error) {
 }
 
 func (s *StructPacker) ReadFrom(r io.Reader, v reflect.Value) (int, error) {
-	for v.Kind() != reflect.Ptr || v.Elem().Type() != s.typ {
+	var rv reflect.Value
+	if v.Type() == s.typ && v.CanSet() {
+		rv = v
+	} else {
+		rv = inderectValue(v)
+	}
+	if rv.Type() != s.typ {
 		panic("type assertion error")
 	}
-	if v.IsNil() {
-		zv := reflect.Zero(s.typ)
-		v.Elem().Set(zv)
-	}
-	rv := v.Elem()
 
 	size := 0
 
@@ -359,4 +350,56 @@ func (s *StructPacker) ReadFrom(r io.Reader, v reflect.Value) (int, error) {
 	}
 
 	return size, nil
+}
+
+func inderectValue(rv0 reflect.Value) reflect.Value {
+	rv := rv0
+	//	println(fmt.Sprintf("indirect %v %v %v", rv.Kind(), rv.Type(), rv))
+	for rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			rv.Set(reflect.New(rv.Type().Elem()))
+		}
+		rv = rv.Elem()
+		//	println(fmt.Sprintf("    step %v %v %v", rv.Kind(), rv.Type(), rv))
+	}
+	return rv
+}
+func inderectValueConst(rv0 reflect.Value) reflect.Value {
+	rv := rv0
+	for rv.Kind() == reflect.Ptr {
+		if !rv.IsNil() {
+			rv = rv.Elem()
+			continue
+		}
+		t := rv.Type()
+		for t.Kind() == reflect.Ptr {
+			t = t.Elem()
+		}
+		return reflect.Zero(t)
+	}
+	return rv
+}
+
+func DeepValueDump(rv reflect.Value) string {
+	var buf bytes.Buffer
+	deepValueDump(rv, 0, &buf)
+	return buf.String()
+}
+func deepValueDump(rv reflect.Value, sh int, w io.Writer) {
+	for i := 0; i < sh; i++ {
+		w.Write([]byte("    "))
+	}
+	fmt.Fprintf(w, "%v %v %v\n", rv.Type().Kind(), rv.Type(), rv)
+}
+
+func DeepTypeDump(t reflect.Type) string {
+	var buf bytes.Buffer
+	deepTypeDump(t, 0, &buf)
+	return buf.String()
+}
+func deepTypeDump(t reflect.Type, sh int, w io.Writer) {
+	for i := 0; i < sh; i++ {
+		w.Write([]byte("    "))
+	}
+	fmt.Fprintf(w, "%v %v\n", t.Kind(), t)
 }

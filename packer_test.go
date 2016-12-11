@@ -328,6 +328,14 @@ type TestableStruct1 struct {
 	N int
 	n int
 	S []byte
+
+	N2 *int
+	//	S2 string
+
+	Sub struct {
+		V int
+		S []byte
+	}
 }
 
 func TestStruct1(t *testing.T) {
@@ -335,10 +343,12 @@ func TestStruct1(t *testing.T) {
 		N: 10000,
 		S: []byte("qqwe;qcqlnoibiobowibeql"),
 	}
+	v.Sub.V = 400
+	v.Sub.S = []byte("qwsss3wwqqqqf24330")
 
 	p := CreatePacker(v)
 
-	size := p.Size(reflect.ValueOf(v))
+	size := p.Size(reflect.ValueOf(&v))
 
 	data, err := Marshal(v)
 	if err != nil {
@@ -377,6 +387,7 @@ func BenchmarkPackerStruct1Encode(t *testing.B) {
 	}
 
 	s := buf.Len()
+	data := buf.Bytes()
 	//	t.Logf("packed size: %v", s)
 
 	t.ReportAllocs()
@@ -388,7 +399,7 @@ func BenchmarkPackerStruct1Encode(t *testing.B) {
 	}
 
 	if !reflect.DeepEqual(v, res) {
-		t.Errorf("marshal/unmarshal error %v become %v. data: %d [%x]", v, res, buf.Len(), buf.Bytes())
+		t.Errorf("marshal/unmarshal error %v become %v. data: %d [%x]", v, res, s, data)
 	}
 
 	for i := 0; i < t.N; i++ {
@@ -434,4 +445,131 @@ func BenchmarkGob___Struct1Encode(t *testing.B) {
 		_ = r.Decode(&res)
 		buf.Reset()
 	}
+}
+
+type Context struct {
+	buf bytes.Buffer
+	e   enci
+	d   deci
+	val interface{}
+	res interface{}
+}
+
+type enci interface {
+	Encode(v interface{}) error
+}
+type deci interface {
+	Decode(v interface{}) error
+}
+
+func runGlobal(t testing.TB) {
+	ctx := Context{}
+	for _, ed := range []struct {
+		name string
+		e    enci
+		d    deci
+	}{
+		{
+			name: "packer",
+			e:    NewEncoder(&ctx.buf),
+			d:    NewDecoder(&ctx.buf),
+		},
+		{
+			name: "gob",
+			e:    gob.NewEncoder(&ctx.buf),
+			d:    gob.NewDecoder(&ctx.buf),
+		},
+	} {
+		switch t := t.(type) {
+		case *testing.T:
+			t.Run(ed.name, func(t *testing.T) {
+				ctx.e = ed.e
+				ctx.d = ed.d
+				runForEncoderDecoder(t, &ctx)
+			})
+		case *testing.B:
+			t.Run(ed.name, func(t *testing.B) {
+				ctx.e = ed.e
+				ctx.d = ed.d
+				runForEncoderDecoder(t, &ctx)
+			})
+		}
+	}
+}
+
+func runForEncoderDecoder(t testing.TB, ctx *Context) {
+	for _, suit := range []struct {
+		name string
+		N    int
+		val  func() interface{}
+		res  interface{}
+	}{
+		{
+			name: "int",
+			N:    1,
+			val:  func() interface{} { return rand.Int() },
+			res:  new(int),
+		},
+	} {
+		switch t := t.(type) {
+		case *testing.T:
+			t.Run(suit.name, func(t *testing.T) {
+				for i := 0; i < suit.N; i++ {
+					ctx.val = suit.val()
+					ctx.res = suit.res
+					runForSuit(t, ctx)
+				}
+			})
+		case *testing.B:
+			t.Run(suit.name, func(t *testing.B) {
+				ctx.val = suit.val()
+				ctx.res = suit.res
+				runForSuit(t, ctx)
+			})
+		}
+	}
+}
+
+func runForSuit(t testing.TB, ctx *Context) {
+	err := ctx.e.Encode(ctx.val)
+	if err != nil {
+		t.Errorf("encode %v error: %v", ctx.val, err)
+	}
+
+	s := ctx.buf.Len()
+	//	t.Logf("packed size: %v", s)
+
+	err = ctx.d.Decode(ctx.res)
+	if err != nil {
+		t.Errorf("encode %v error: %v", ctx.val, err)
+	}
+
+	res := reflect.ValueOf(ctx.res).Elem().Interface()
+	if !reflect.DeepEqual(ctx.val, res) {
+		t.Errorf("marshal/unmarshal error: %T %v become %T %v. data: %d [%x]", ctx.val, ctx.val, ctx.res, ctx.res, ctx.buf.Len(), ctx.buf.Bytes())
+	}
+
+	if t, ok := t.(*testing.B); ok {
+		t.ReportAllocs()
+		t.SetBytes(int64(s))
+
+		for i := 0; i < t.N; i++ {
+			_ = ctx.e.Encode(ctx.val)
+			_ = ctx.d.Decode(ctx.res)
+			ctx.buf.Reset()
+		}
+	}
+
+	ctx.buf.Reset()
+}
+
+func TestGlobal(t *testing.T) {
+	runGlobal(t)
+}
+
+func BenchmarkGlobal(t *testing.B) {
+	runGlobal(t)
+}
+
+func TestDump(t *testing.T) {
 }
